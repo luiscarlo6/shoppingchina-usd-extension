@@ -31,12 +31,43 @@ shoppingchina-usd-extension/
   styles.css      -> estilos del badge
 ```
 
-## Cargar en Chrome (prueba local)
+## Instalación (para vos y tus amigos)
+
+El repo es **privado**, así que primero el dueño te tiene que agregar como
+**colaborador** en GitHub (Settings → Collaborators). Una vez que tengas acceso,
+elegí una de estas dos formas de bajar el código:
+
+### Opción 1 — Clonar con git (recomendada, fácil de actualizar)
+
+```bash
+git clone https://github.com/luiscarlo6/shoppingchina-usd-extension.git
+```
+
+Para actualizar a la última versión más adelante:
+
+```bash
+cd shoppingchina-usd-extension
+git pull
+```
+
+### Opción 2 — Descargar el ZIP
+
+En la página del repo: botón verde **Code** → **Download ZIP** → descomprimir.
+
+### Cargar en Chrome
 
 1. Abrí `chrome://extensions`.
 2. Activá **Developer mode** (arriba a la derecha).
 3. Clic en **Load unpacked**.
-4. Seleccioná esta carpeta (`shoppingchina-usd-extension`).
+4. Seleccioná la carpeta `shoppingchina-usd-extension` (la que contiene el
+   `manifest.json`).
+5. Listo: la extensión se activa sola en `shoppingchina.com.py`.
+
+> Nota: al ser una extensión sin empaquetar (modo desarrollador), Chrome puede
+> mostrar un aviso de "deshabilitar extensiones en modo desarrollador" al
+> iniciar. Se ignora sin problema. Si actualizás el código con `git pull`,
+> acordate de tocar el botón de **recargar** de la extensión en
+> `chrome://extensions`.
 
 ## Probar
 
@@ -57,14 +88,18 @@ o, mientras carga: `Buscando U$...`
 ## Debug (consola)
 
 Abrí DevTools (`F12`) en la pestaña de Shopping China, pestaña **Console**.
-Deberías ver logs como:
+Al cargar la página y luego al pasar el mouse sobre un producto, deberías ver
+logs como:
 
 ```
-[ShoppingChina USD] Extensión cargada
-[ShoppingChina USD] Links encontrados: 24
+[ShoppingChina USD] Extensión cargada (modo hover)
+[ShoppingChina USD] Pasá el mouse sobre un producto para ver su precio U$.
 [ShoppingChina USD] Consultando ficha: https://www.shoppingchina.com.py/producto/...
 [ShoppingChina USD] Precio encontrado: U$ 1.750,00 TAX FREE
 ```
+
+Cuando un precio ya estaba cacheado, vas a ver `Cache hit:` en vez de
+`Consultando ficha:`.
 
 ## Después de editar el código
 
@@ -78,15 +113,17 @@ Cada vez que cambies `content.js`, `styles.css` o `manifest.json`:
 
 1. ¿La extensión aparece activa en `chrome://extensions`?
 2. ¿La URL empieza con `https://www.shoppingchina.com.py/`?
-3. ¿La consola muestra `[ShoppingChina USD] Extensión cargada`?
-4. ¿La consola muestra `Links encontrados`?
+3. ¿La consola muestra `[ShoppingChina USD] Extensión cargada (modo hover)`?
+4. Al pasar el mouse sobre un producto, ¿aparece `Buscando U$...`?
 5. ¿Hay errores rojos en la consola?
-6. ¿En la pestaña **Network** aparecen requests a `/producto/...`?
+6. ¿En la pestaña **Network** aparece un request a `/producto/...` al hacer hover?
 
-- Si el paso 3 funciona pero `Links encontrados: 0`, el problema está en
-  `PRODUCT_LINK_SELECTOR`.
-- Si encuentra links pero no precio USD, ajustá la regex:
+- Si al pasar el mouse nunca aparece el badge, el problema suele estar en
+  `PRODUCT_LINK_SELECTOR` o en `findProductContext` (no encuentra la tarjeta).
+- Si encuentra la ficha pero no el precio USD, ajustá la regex:
   `/U\$\s*([\d.]+,\d{2})\s*TAX\s*FREE/i`
+- Si ves errores `HTTP 403` o de red, puede ser un bloqueo temporal del firewall
+  del sitio: esperá un rato antes de reintentar.
 
 ## Notas
 
