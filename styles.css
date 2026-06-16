@@ -10,3 +10,8 @@
   line-height: 1.2;
   white-space: nowrap;
 }
+
+/* Valor confirmado por el API (USD exacto del producto). */
+.sc-usd-taxfree-badge.sc-usd-exact {
+  background: #065f46;
+}

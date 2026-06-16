@@ -1,4 +1,4 @@
-console.log("[ShoppingChina USD] Extensión cargada (modo tasa)");
+console.log("[ShoppingChina USD] Extensión cargada (modo tasa + exacto on-hover)");
 
 const PRODUCT_LINK_SELECTOR = [
   'a[href^="/producto/"]',
@@ -6,16 +6,26 @@ const PRODUCT_LINK_SELECTOR = [
 ].join(",");
 
 const RATE_KEY = "shoppingChinaRate";
-const DEFAULT_RATE = 6985; // divisor Gs/USD observado (incluye IVA 10%)
+const DEFAULT_RATE = 6985; // divisor Gs/USD del régimen TAX FREE (incluye IVA 10%)
 const RATE_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
 const RATE_MIN = 5000; // guardarraíles de sanidad para descartar valores absurdos
 const RATE_MAX = 9000;
 const BADGE_CLASS = "sc-usd-taxfree-badge";
 const QUICK_SEARCH_PATH = "/quick_search?search=";
 
+// Capa de exactitud por producto (hover)
+const HOVER_DELAY_MS = 400; // hay que quedarse sobre el producto este tiempo
+const DIVISOR_KEY_PREFIX = "scDivisor:"; // cache por id de producto
+const DIVISOR_TTL_MS = 1000 * 60 * 60 * 24; // 24 horas
+const TAXFREE_DIVISOR_MIN = 6700; // divisor >= esto => régimen TAX FREE (sin IVA)
+
 let currentRate = DEFAULT_RATE;
 let scanTimer = null;
 let refreshing = false;
+
+const hoverTimers = new WeakMap(); // card -> timeout pendiente
+const divisorCache = new Map(); // id de producto -> divisor exacto
+let exactInFlight = false; // garantiza 1 request de exactitud a la vez
 
 /* ---------------- utilidades numéricas ---------------- */
 
@@ -64,7 +74,18 @@ function plausibleRate(r) {
   return Number.isFinite(r) && r >= RATE_MIN && r <= RATE_MAX;
 }
 
-/* ---------------- manejo de la tasa ---------------- */
+function extractProductId(href) {
+  if (!href) return null;
+  try {
+    const path = new URL(href, location.origin).pathname.replace(/\/+$/, "");
+    const m = path.match(/(\d+)$/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------- manejo de la tasa estimada ---------------- */
 
 async function loadStoredRate() {
   try {
@@ -92,7 +113,7 @@ async function saveRate(value, source) {
     await chrome.storage.local.set({
       [RATE_KEY]: { value: rounded, savedAt: Date.now(), source }
     });
-    console.log(`[ShoppingChina USD] Tasa actualizada: ${rounded} (${source})`);
+    console.log(`[ShoppingChina USD] Tasa estimada actualizada: ${rounded} (${source})`);
   } catch (e) {
     console.warn("[ShoppingChina USD] No se pudo guardar la tasa:", e);
   }
@@ -100,7 +121,7 @@ async function saveRate(value, source) {
 
 function pickSeedTerm() {
   // Usa una palabra del primer producto de la página para que la calibración
-  // caiga en la misma categoría (mismo IVA) que lo que estás mirando.
+  // de la tasa estimada caiga en una categoría representativa.
   const anchor = document.querySelector(PRODUCT_LINK_SELECTOR);
   const text = (anchor?.textContent || "").trim();
   const word = text
@@ -114,7 +135,7 @@ async function refreshRateFromApi() {
   refreshing = true;
   try {
     const seed = pickSeedTerm();
-    console.log("[ShoppingChina USD] Calibrando tasa con quick_search:", seed);
+    console.log("[ShoppingChina USD] Calibrando tasa estimada con quick_search:", seed);
 
     const res = await fetch(QUICK_SEARCH_PATH + encodeURIComponent(seed), {
       credentials: "include"
@@ -122,14 +143,16 @@ async function refreshRateFromApi() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const items = await res.json();
+    // Para la tasa estimada nos quedamos con el régimen TAX FREE (el más alto),
+    // que es el de la electrónica de valor. Tomamos la mediana de los divisores
+    // cercanos a ese régimen.
     const ratios = [];
-
     for (const it of items || []) {
       const pyg = parseFloat(it.regular_price_pyg);
       const usd = parseFloat(it.regular_price_usd);
       if (pyg > 0 && usd > 0) {
         const r = pyg / usd;
-        if (plausibleRate(r)) ratios.push(r);
+        if (r >= TAXFREE_DIVISOR_MIN && plausibleRate(r)) ratios.push(r);
       }
     }
 
@@ -139,7 +162,7 @@ async function refreshRateFromApi() {
       return true;
     }
 
-    console.warn("[ShoppingChina USD] quick_search no devolvió una tasa válida");
+    console.warn("[ShoppingChina USD] quick_search no dio una tasa TAX FREE válida");
     return false;
   } catch (e) {
     console.warn("[ShoppingChina USD] Falló la calibración por API:", e);
@@ -150,8 +173,8 @@ async function refreshRateFromApi() {
 }
 
 function calibrateFromFicha() {
-  // En la ficha del producto aparecen Gs y "U$ ... TAX FREE" como texto:
-  // calibramos la tasa exacta sin gastar una request.
+  // En la ficha de un producto TAX FREE aparece "U$ ... TAX FREE": calibramos
+  // la tasa estimada exacta de ese régimen sin gastar una request.
   if (!location.pathname.includes("/producto/")) return false;
 
   const body = document.body.innerText || "";
@@ -164,7 +187,7 @@ function calibrateFromFicha() {
 
   const effectiveGs = Math.min(...gsList);
   const r = effectiveGs / usd;
-  if (plausibleRate(r)) {
+  if (r >= TAXFREE_DIVISOR_MIN && plausibleRate(r)) {
     saveRate(r, "ficha");
     return true;
   }
@@ -212,35 +235,56 @@ function findGuaraniPriceElement(container) {
   return best?.parentElement || container;
 }
 
-function paintCard(card) {
-  const gsList = parseAllGs(card.innerText || "");
-  if (!gsList.length) return;
-
-  const effectiveGs = Math.min(...gsList);
-  const usd = Math.round(effectiveGs / currentRate);
-  if (!Number.isFinite(usd) || usd <= 0) return;
-
+function getOrCreateBadge(card) {
   let badge = card.querySelector("." + BADGE_CLASS);
-
-  // Evita re-pintar si nada cambió (misma tasa y mismo precio).
-  if (
-    badge &&
-    badge.dataset.scRate === String(currentRate) &&
-    badge.dataset.scGs === String(effectiveGs)
-  ) {
-    return;
-  }
-
   if (!badge) {
     const priceEl = findGuaraniPriceElement(card);
     badge = document.createElement("div");
     badge.className = BADGE_CLASS;
     priceEl.insertAdjacentElement("afterend", badge);
   }
+  return badge;
+}
 
+function effectiveGsOf(card) {
+  const gsList = parseAllGs(card.innerText || "");
+  return gsList.length ? Math.min(...gsList) : null;
+}
+
+function paintEstimate(card) {
+  const effectiveGs = effectiveGsOf(card);
+  if (effectiveGs == null) return;
+
+  const usd = Math.round(effectiveGs / currentRate);
+  if (!Number.isFinite(usd) || usd <= 0) return;
+
+  const existing = card.querySelector("." + BADGE_CLASS);
+
+  // No pisar un badge ya resuelto exacto.
+  if (existing && existing.dataset.scExact === "1") return;
+
+  // Evitar re-pintar si nada cambió.
+  if (
+    existing &&
+    existing.dataset.scRate === String(currentRate) &&
+    existing.dataset.scGs === String(effectiveGs)
+  ) {
+    return;
+  }
+
+  const badge = getOrCreateBadge(card);
   badge.textContent = `≈ U$ ${formatUsd(usd)} TAX FREE`;
   badge.dataset.scRate = String(currentRate);
   badge.dataset.scGs = String(effectiveGs);
+  badge.classList.remove("sc-usd-exact");
+}
+
+function setExactBadge(card, usd, taxFree, effectiveGs) {
+  const badge = getOrCreateBadge(card);
+  badge.textContent = `U$ ${formatUsd(usd)}${taxFree ? " TAX FREE" : ""}`;
+  badge.dataset.scExact = "1";
+  badge.dataset.scGs = String(effectiveGs);
+  badge.classList.add("sc-usd-exact");
 }
 
 function paintAll() {
@@ -252,13 +296,13 @@ function paintAll() {
     const card = findCardFromAnchor(anchor);
     if (!card || seen.has(card)) return;
     seen.add(card);
-    paintCard(card);
+    paintEstimate(card);
     painted++;
   });
 
   if (painted) {
     console.log(
-      `[ShoppingChina USD] ${painted} producto(s) con USD calculado (tasa ${currentRate})`
+      `[ShoppingChina USD] ${painted} producto(s) estimado(s) (tasa ${currentRate}). Pasá el mouse para el valor exacto.`
     );
   }
 }
@@ -266,6 +310,126 @@ function paintAll() {
 function scheduleScan() {
   clearTimeout(scanTimer);
   scanTimer = setTimeout(paintAll, 300);
+}
+
+/* ---------------- exactitud por producto (hover) ---------------- */
+
+async function getExactDivisor(card, id) {
+  if (divisorCache.has(id)) return divisorCache.get(id);
+
+  const key = DIVISOR_KEY_PREFIX + id;
+  try {
+    const res = await chrome.storage.local.get(key);
+    const cached = res[key];
+    if (
+      cached &&
+      Number.isFinite(cached.divisor) &&
+      Date.now() - cached.savedAt < DIVISOR_TTL_MS
+    ) {
+      divisorCache.set(id, cached.divisor);
+      return cached.divisor;
+    }
+  } catch {
+    /* seguimos al fetch */
+  }
+
+  const anchors = [...card.querySelectorAll(PRODUCT_LINK_SELECTOR)];
+  const title = anchors
+    .map(a => (a.textContent || "").trim().replace(/\s+/g, " "))
+    .reduce((longest, t) => (t.length > longest.length ? t : longest), "");
+  if (!title) return null;
+
+  console.log("[ShoppingChina USD] Consultando USD exacto:", title);
+  const res = await fetch(QUICK_SEARCH_PATH + encodeURIComponent(title), {
+    credentials: "include"
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const items = await res.json();
+  for (const it of items || []) {
+    const itId = extractProductId(it.url_es) || extractProductId(it.url_po);
+    const pyg = parseFloat(it.regular_price_pyg);
+    const usd = parseFloat(it.regular_price_usd);
+    if (itId === id && pyg > 0 && usd > 0) {
+      const divisor = pyg / usd;
+      if (plausibleRate(divisor)) {
+        divisorCache.set(id, divisor);
+        chrome.storage.local
+          .set({ [key]: { divisor, savedAt: Date.now() } })
+          .catch(() => {});
+        return divisor;
+      }
+    }
+  }
+  return null; // el producto no apareció en quick_search
+}
+
+async function resolveExact(card) {
+  const anchor = card.querySelector(PRODUCT_LINK_SELECTOR);
+  const id = extractProductId(anchor?.href);
+  if (!id) return;
+
+  const current = card.querySelector("." + BADGE_CLASS);
+  if (current && current.dataset.scExact === "1") return;
+
+  // 1 request de exactitud a la vez.
+  while (exactInFlight) {
+    await new Promise(r => setTimeout(r, 120));
+  }
+  const recheck = card.querySelector("." + BADGE_CLASS);
+  if (recheck && recheck.dataset.scExact === "1") return;
+
+  exactInFlight = true;
+  try {
+    const divisor = await getExactDivisor(card, id);
+    if (!divisor) return;
+
+    const effectiveGs = effectiveGsOf(card);
+    if (effectiveGs == null) return;
+
+    const usd = Math.round(effectiveGs / divisor);
+    if (!Number.isFinite(usd) || usd <= 0) return;
+
+    const taxFree = divisor >= TAXFREE_DIVISOR_MIN;
+    setExactBadge(card, usd, taxFree, effectiveGs);
+    console.log(
+      `[ShoppingChina USD] USD exacto: U$ ${usd} (divisor ${Math.round(divisor)}, ${taxFree ? "TAX FREE" : "normal"}) id ${id}`
+    );
+  } catch (e) {
+    console.warn("[ShoppingChina USD] No se pudo traer USD exacto:", e);
+  } finally {
+    exactInFlight = false;
+  }
+}
+
+function onPointerOver(event) {
+  const anchor = event.target.closest?.(PRODUCT_LINK_SELECTOR);
+  if (!anchor) return;
+  const card = findCardFromAnchor(anchor);
+  if (!card) return;
+
+  const badge = card.querySelector("." + BADGE_CLASS);
+  if (badge && badge.dataset.scExact === "1") return;
+  if (hoverTimers.has(card)) return;
+
+  const timer = setTimeout(() => {
+    hoverTimers.delete(card);
+    resolveExact(card);
+  }, HOVER_DELAY_MS);
+  hoverTimers.set(card, timer);
+}
+
+function onPointerOut(event) {
+  const anchor = event.target.closest?.(PRODUCT_LINK_SELECTOR);
+  if (!anchor) return;
+  const card = findCardFromAnchor(anchor);
+  if (!card) return;
+
+  const timer = hoverTimers.get(card);
+  if (timer) {
+    clearTimeout(timer);
+    hoverTimers.delete(card);
+  }
 }
 
 /* ---------------- arranque ---------------- */
@@ -276,7 +440,7 @@ async function init() {
   // Calibración gratis (sin red) si estamos dentro de una ficha de producto.
   const calibrated = calibrateFromFicha();
 
-  // Pintamos de inmediato con la mejor tasa disponible.
+  // Pintamos las estimaciones de inmediato con la mejor tasa disponible.
   paintAll();
 
   // Solo pedimos al API si la tasa está vencida y no pudimos calibrar en ficha.
@@ -284,6 +448,9 @@ async function init() {
     const ok = await refreshRateFromApi();
     if (ok) paintAll();
   }
+
+  document.addEventListener("pointerover", onPointerOver, { passive: true });
+  document.addEventListener("pointerout", onPointerOut, { passive: true });
 
   const observer = new MutationObserver(scheduleScan);
   observer.observe(document.body, { childList: true, subtree: true });
