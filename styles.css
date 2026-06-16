@@ -1,0 +1,19 @@
+.sc-usd-taxfree-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  background: #0f766e;
+  color: white;
+  line-height: 1.2;
+}
+
+.sc-usd-loading {
+  background: #64748b;
+}
+
+.sc-usd-error {
+  background: #991b1b;
+}

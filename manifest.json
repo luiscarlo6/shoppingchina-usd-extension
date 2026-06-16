@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Shopping China USD Tax Free",
+  "version": "0.1.0",
+  "description": "Muestra el precio U$ TAX FREE en listados y búsquedas de Shopping China.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.shoppingchina.com.py/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.shoppingchina.com.py/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
