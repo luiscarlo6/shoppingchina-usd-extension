@@ -8,12 +8,5 @@
   background: #0f766e;
   color: white;
   line-height: 1.2;
-}
-
-.sc-usd-loading {
-  background: #64748b;
-}
-
-.sc-usd-error {
-  background: #991b1b;
+  white-space: nowrap;
 }
